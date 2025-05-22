@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# Sub-Store 部署脚本 - 适配现有反代环境
-# 支持宝塔、1Panel、Nginx Proxy Manager 等面板
+# Sub-Store 完整部署脚本
+# 包含 Docker + Nginx 反代 + SSL 证书
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -16,7 +16,7 @@ print_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
 # 生成随机 API 路径
 generate_api_path() {
-    local chars="ABCGEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+    local chars="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
     local path=""
     for i in {1..32}; do
         path+="${chars:RANDOM%${#chars}:1}"
@@ -24,35 +24,20 @@ generate_api_path() {
     echo "/api-$path"
 }
 
-# 检测现有反代环境
-detect_proxy_env() {
-    local proxy_type=""
-    
-    # 检测宝塔面板
-    if [[ -d "/www/server/panel" ]]; then
-        proxy_type="bt"
-    # 检测1Panel
-    elif [[ -d "/opt/1panel" ]]; then
-        proxy_type="1panel"
-    # 检测Nginx Proxy Manager
-    elif docker ps | grep -q "nginxproxymanager"; then
-        proxy_type="npm"
-    # 检测原生Nginx
-    elif systemctl is-active --quiet nginx && [[ ! -d "/www/server/panel" ]]; then
-        proxy_type="nginx"
-    # 检测其他Docker反代
-    elif docker ps | grep -E "(traefik|caddy|proxy)" > /dev/null; then
-        proxy_type="docker"
+# 检测系统环境
+detect_system() {
+    if [[ -f /etc/debian_version ]]; then
+        echo "debian"
+    elif [[ -f /etc/redhat-release ]]; then
+        echo "centos"
     else
-        proxy_type="none"
+        echo "unknown"
     fi
-    
-    echo "$proxy_type"
 }
 
 echo "=================================================="
-echo "       Sub-Store 智能部署脚本"
-echo "       适配各种反代环境"
+echo "       Sub-Store 完整部署脚本"
+echo "     Docker + Nginx + SSL 一键配置"
 echo "=================================================="
 echo
 
@@ -62,37 +47,9 @@ if [[ $EUID -ne 0 ]]; then
    exit 1
 fi
 
-# 检测环境
-print_info "检测服务器环境..."
-PROXY_ENV=$(detect_proxy_env)
-
-case $PROXY_ENV in
-    "bt")
-        print_warning "检测到宝塔面板环境"
-        print_info "将使用宝塔友好模式部署"
-        ;;
-    "1panel")
-        print_warning "检测到 1Panel 面板环境"
-        print_info "将使用 1Panel 友好模式部署"
-        ;;
-    "npm")
-        print_warning "检测到 Nginx Proxy Manager 环境"
-        print_info "将使用 NPM 友好模式部署"
-        ;;
-    "nginx")
-        print_warning "检测到原生 Nginx 环境"
-        print_info "将谨慎处理 Nginx 配置"
-        ;;
-    "docker")
-        print_warning "检测到其他 Docker 反代环境"
-        print_info "将使用纯 Docker 模式部署"
-        ;;
-    "none")
-        print_info "未检测到反代环境，使用标准模式"
-        ;;
-esac
-
-echo
+# 获取系统信息
+SYSTEM=$(detect_system)
+print_info "检测到系统: $SYSTEM"
 
 # 获取配置
 while true; do
@@ -104,26 +61,9 @@ while true; do
     fi
 done
 
-# 根据环境选择端口
-case $PROXY_ENV in
-    "bt"|"1panel"|"npm"|"nginx")
-        print_info "检测到面板环境，建议使用非标准端口"
-        read -p "请输入服务端口 (建议: 13001): " PORT
-        PORT=${PORT:-13001}
-        ;;
-    *)
-        read -p "请输入服务端口 (默认: 3001): " PORT
-        PORT=${PORT:-3001}
-        ;;
-esac
+read -p "请输入服务端口 (默认: 3001): " PORT
+PORT=${PORT:-3001}
 
-# 检查端口占用
-if netstat -tlnp | grep -q ":$PORT "; then
-    print_error "端口 $PORT 已被占用，请选择其他端口"
-    exit 1
-fi
-
-# API 路径配置
 read -p "请输入 API 路径 (留空自动生成): " API_PATH
 if [[ -z "$API_PATH" ]]; then
     API_PATH=$(generate_api_path)
@@ -134,37 +74,68 @@ fi
 
 # 配置变量
 API_URL="https://$DOMAIN$API_PATH"
-DATA_DIR="/opt/sub-store-data"  # 使用 /opt 避免与面板冲突
+DATA_DIR="/opt/sub-store-data"
+NGINX_CONF="/etc/nginx/sites-available/$DOMAIN"
+NGINX_LINK="/etc/nginx/sites-enabled/$DOMAIN"
 
 echo
 print_info "部署配置:"
 echo "域名: $DOMAIN"
 echo "端口: $PORT"
 echo "API路径: $API_PATH"
+echo "API地址: $API_URL"
 echo "数据目录: $DATA_DIR"
-echo "反代环境: $PROXY_ENV"
 echo
 
 read -p "确认配置无误？(y/N): " confirm
 [[ ! "$confirm" =~ ^[Yy]$ ]] && exit 0
 
 echo
-print_info "开始部署..."
+print_info "开始完整部署..."
 
-# 1. 安装 Docker（如果需要）
-if ! command -v docker &> /dev/null; then
-    print_info "安装 Docker..."
-    curl -fsSL https://get.docker.com | sh
-    systemctl enable docker
-    systemctl start docker
+# 1. 更新系统并安装软件
+print_info "1. 更新系统并安装必要软件..."
+if [[ "$SYSTEM" == "debian" ]]; then
+    export DEBIAN_FRONTEND=noninteractive
+    apt update && apt upgrade -y
+    apt install -y nginx certbot python3-certbot-nginx docker.io curl wget ufw
+elif [[ "$SYSTEM" == "centos" ]]; then
+    yum update -y
+    yum install -y nginx certbot python3-certbot-nginx docker curl wget firewalld
+    systemctl enable firewalld
+    systemctl start firewalld
+else
+    print_error "不支持的系统类型"
+    exit 1
 fi
 
-# 2. 创建数据目录
-print_info "创建数据目录..."
+# 2. 启动服务
+print_info "2. 启动基础服务..."
+systemctl enable docker nginx
+systemctl start docker nginx
+
+# 3. 配置防火墙
+print_info "3. 配置防火墙..."
+if [[ "$SYSTEM" == "debian" ]]; then
+    ufw --force enable
+    ufw allow ssh
+    ufw allow 80
+    ufw allow 443
+    ufw allow $PORT
+elif [[ "$SYSTEM" == "centos" ]]; then
+    firewall-cmd --permanent --add-service=ssh
+    firewall-cmd --permanent --add-service=http
+    firewall-cmd --permanent --add-service=https
+    firewall-cmd --permanent --add-port=$PORT/tcp
+    firewall-cmd --reload
+fi
+
+# 4. 创建数据目录
+print_info "4. 创建数据目录..."
 mkdir -p "$DATA_DIR"
 
-# 3. 启动容器
-print_info "启动 Sub-Store 容器..."
+# 5. 启动 Docker 容器
+print_info "5. 启动 Sub-Store 容器..."
 docker stop sub-store 2>/dev/null || true
 docker rm sub-store 2>/dev/null || true
 docker pull xream/sub-store
@@ -188,91 +159,256 @@ fi
 
 print_success "Sub-Store 容器启动成功"
 
-# 4. 根据环境提供配置指导
-echo
-echo "=================================================="
-print_success "🎉 Sub-Store 部署完成！"
-echo "=================================================="
-echo
-print_info "容器信息:"
-echo "端口: 127.0.0.1:$PORT"
-echo "API路径: $API_PATH"
-echo
+# 6. 配置 Nginx 反向代理
+print_info "6. 配置 Nginx 反向代理..."
 
-case $PROXY_ENV in
-    "bt")
-        print_info "宝塔面板配置指导:"
-        echo "1. 打开宝塔面板 -> 网站"
-        echo "2. 添加站点，域名: $DOMAIN"
-        echo "3. 设置 -> 反向代理"
-        echo "4. 目标URL: http://127.0.0.1:$PORT"
-        echo "5. 发送域名: \$host"
-        echo "6. SSL 在宝塔面板中申请"
-        ;;
-    "1panel")
-        print_info "1Panel 配置指导:"
-        echo "1. 打开 1Panel -> 网站"
-        echo "2. 创建网站，域名: $DOMAIN"
-        echo "3. 配置反向代理"
-        echo "4. 代理地址: http://127.0.0.1:$PORT"
-        echo "5. 在 1Panel 中申请 SSL 证书"
-        ;;
-    "npm")
-        print_info "Nginx Proxy Manager 配置指导:"
-        echo "1. 打开 NPM 管理界面"
-        echo "2. Proxy Hosts -> Add Proxy Host"
-        echo "3. Domain: $DOMAIN"
-        echo "4. Forward Hostname/IP: 127.0.0.1"
-        echo "5. Forward Port: $PORT"
-        echo "6. 启用 SSL 和 Force SSL"
-        ;;
-    "nginx")
-        print_warning "检测到原生 Nginx，请手动配置:"
-        echo "在 Nginx 配置中添加:"
-        echo "location / {"
-        echo "    proxy_pass http://127.0.0.1:$PORT;"
-        echo "    proxy_set_header Host \$host;"
-        echo "    proxy_set_header X-Real-IP \$remote_addr;"
-        echo "}"
-        ;;
-    *)
-        print_info "请在您的反代中配置:"
-        echo "目标地址: http://127.0.0.1:$PORT"
-        echo "域名: $DOMAIN"
-        ;;
-esac
+# 删除默认配置
+[[ -f "/etc/nginx/sites-enabled/default" ]] && rm -f /etc/nginx/sites-enabled/default
 
-echo
-print_info "访问地址 (配置反代后):"
-echo "🌐 管理面板: https://$DOMAIN"
-echo "📱 订阅地址: https://$DOMAIN/subs?api=$API_URL"
-echo
-print_warning "重要提醒:"
-echo "1. 请在面板中为域名配置 SSL 证书"
-echo "2. 确保域名已解析到服务器 IP"
-echo "3. 妥善保管 API 路径: $API_PATH"
+# 创建初始 HTTP 配置
+cat > "$NGINX_CONF" << NGINX_HTTP
+server {
+    listen 80;
+    server_name $DOMAIN;
 
-# 5. 创建管理脚本
-cat > /opt/substore_manage.sh << 'MANAGE'
+    location / {
+        proxy_pass http://127.0.0.1:$PORT;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        
+        # WebSocket 支持
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+
+    # 健康检查
+    location /health {
+        access_log off;
+        return 200 "healthy\\n";
+        add_header Content-Type text/plain;
+    }
+}
+NGINX_HTTP
+
+# 创建软链接
+[[ ! -f "$NGINX_LINK" ]] && ln -s "$NGINX_CONF" "$NGINX_LINK"
+
+# 测试并重载配置
+if nginx -t; then
+    systemctl reload nginx
+    print_success "Nginx HTTP 配置已生效"
+else
+    print_error "Nginx 配置测试失败"
+    exit 1
+fi
+
+# 7. 申请 SSL 证书
+print_info "7. 申请 SSL 证书..."
+print_warning "请确保域名 $DOMAIN 已正确解析到此服务器"
+
+read -p "现在申请 SSL 证书吗？(y/N): " ssl_confirm
+if [[ "$ssl_confirm" =~ ^[Yy]$ ]]; then
+    read -p "邮箱地址 (用于证书通知，留空跳过): " EMAIL
+    
+    if [[ -n "$EMAIL" ]]; then
+        certbot --nginx --agree-tos --email "$EMAIL" -d "$DOMAIN" --non-interactive
+    else
+        certbot --nginx --agree-tos --register-unsafely-without-email -d "$DOMAIN" --non-interactive
+    fi
+    
+    if [[ $? -eq 0 ]]; then
+        print_success "SSL 证书申请成功"
+        
+        # 8. 更新 HTTPS 配置
+        print_info "8. 更新 HTTPS 配置..."
+        cat > "$NGINX_CONF" << NGINX_HTTPS
+server {
+    listen 80;
+    server_name $DOMAIN;
+    return 301 https://\$host\$request_uri;
+}
+
+server {
+    listen 443 ssl http2;
+    server_name $DOMAIN;
+
+    ssl_certificate /etc/letsencrypt/live/$DOMAIN/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/$DOMAIN/privkey.pem;
+
+    # SSL 优化配置
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers ECDHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384;
+    ssl_prefer_server_ciphers off;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 1d;
+
+    location / {
+        proxy_pass http://127.0.0.1:$PORT;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        
+        # WebSocket 支持
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+
+    # 健康检查
+    location /health {
+        access_log off;
+        return 200 "healthy\\n";
+        add_header Content-Type text/plain;
+    }
+}
+NGINX_HTTPS
+        
+        nginx -t && systemctl reload nginx
+        print_success "HTTPS 配置已生效"
+    else
+        print_error "SSL 证书申请失败，继续使用 HTTP"
+    fi
+else
+    print_warning "跳过 SSL 证书申请"
+fi
+
+# 9. 设置自动续期
+if [[ -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" ]]; then
+    print_info "9. 设置 SSL 证书自动续期..."
+    cat > /etc/cron.daily/cert_renew << CRON_RENEW
+#!/bin/bash
+certbot renew --quiet --deploy-hook "systemctl reload nginx"
+CRON_RENEW
+    chmod +x /etc/cron.daily/cert_renew
+fi
+
+# 10. 设置容器自动更新
+print_info "10. 设置容器自动更新..."
+cat > /etc/cron.d/substore_update << CRON_UPDATE
+# Sub-Store 每3天自动更新
+0 3 */3 * * root /usr/bin/docker pull xream/sub-store && \\
+/usr/bin/docker stop sub-store && \\
+/usr/bin/docker rm sub-store && \\
+/usr/bin/docker run -d --restart=always \\
+--name sub-store \\
+-e "SUB_STORE_CRON=0 0 * * *" \\
+-e "SUB_STORE_FRONTEND_BACKEND_PATH=$API_PATH" \\
+-e "API_URL=$API_URL" \\
+-p "127.0.0.1:$PORT:$PORT" \\
+-v "$DATA_DIR:/opt/app/data" \\
+xream/sub-store > /var/log/substore_update.log 2>&1
+CRON_UPDATE
+
+systemctl restart cron 2>/dev/null || systemctl restart crond 2>/dev/null
+
+# 11. 创建管理脚本
+print_info "11. 创建管理脚本..."
+cat > /opt/substore_manage.sh << 'MANAGE_SCRIPT'
 #!/bin/bash
 case "$1" in
-    start) docker start sub-store && echo "Sub-Store 已启动" ;;
-    stop) docker stop sub-store && echo "Sub-Store 已停止" ;;
-    restart) docker restart sub-store && echo "Sub-Store 已重启" ;;
-    status) docker ps | grep sub-store ;;
-    logs) docker logs -f sub-store ;;
-    update) 
+    start)
+        docker start sub-store
+        echo "Sub-Store 已启动"
+        ;;
+    stop)
+        docker stop sub-store
+        echo "Sub-Store 已停止"
+        ;;
+    restart)
+        docker restart sub-store
+        echo "Sub-Store 已重启"
+        ;;
+    status)
+        echo "=== 容器状态 ==="
+        docker ps | grep sub-store || echo "容器未运行"
+        echo "=== 服务状态 ==="
+        systemctl status nginx --no-pager -l
+        ;;
+    logs)
+        docker logs -f sub-store
+        ;;
+    update)
+        echo "更新 Sub-Store..."
         docker pull xream/sub-store
-        docker stop sub-store && docker rm sub-store
+        docker stop sub-store
+        docker rm sub-store
         echo "请重新运行部署脚本完成更新"
         ;;
-    *) echo "用法: $0 {start|stop|restart|status|logs|update}" ;;
+    info)
+        echo "=== Sub-Store 信息 ==="
+        echo "容器状态: $(docker ps | grep sub-store > /dev/null && echo '运行中' || echo '未运行')"
+        echo "Nginx状态: $(systemctl is-active nginx)"
+        echo "数据目录: $DATA_DIR"
+        ;;
+    *)
+        echo "Sub-Store 管理脚本"
+        echo "用法: $0 {start|stop|restart|status|logs|update|info}"
+        echo ""
+        echo "命令说明:"
+        echo "  start   - 启动服务"
+        echo "  stop    - 停止服务"
+        echo "  restart - 重启服务"
+        echo "  status  - 查看状态"
+        echo "  logs    - 查看日志"
+        echo "  update  - 更新镜像"
+        echo "  info    - 显示信息"
+        ;;
 esac
-MANAGE
+MANAGE_SCRIPT
 
 chmod +x /opt/substore_manage.sh
 
+# 完成部署
+echo
+echo "=================================================="
+print_success "🎉 Sub-Store 完整部署成功！"
+echo "=================================================="
+echo
+
+# 检查最终状态
+CONTAINER_STATUS=$(docker ps | grep sub-store > /dev/null && echo "✅ 运行中" || echo "❌ 未运行")
+NGINX_STATUS=$(systemctl is-active nginx)
+SSL_STATUS=$([[ -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" ]] && echo "✅ 已配置" || echo "❌ 未配置")
+
+print_info "部署状态:"
+echo "Docker容器: $CONTAINER_STATUS"
+echo "Nginx服务: $NGINX_STATUS"
+echo "SSL证书: $SSL_STATUS"
+echo
+
+print_info "访问地址:"
+if [[ -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" ]]; then
+    echo "🌐 管理面板: https://$DOMAIN"
+    echo "📱 订阅地址: https://$DOMAIN/subs?api=$API_URL"
+else
+    echo "🌐 管理面板: http://$DOMAIN"
+    echo "📱 订阅地址: http://$DOMAIN/subs?api=$API_URL"
+fi
+
 echo
 print_info "管理命令:"
-echo "/opt/substore_manage.sh {start|stop|restart|status|logs|update}"
+echo "服务管理: /opt/substore_manage.sh {start|stop|restart|status|logs|update|info}"
+echo "查看状态: /opt/substore_manage.sh status"
+echo "查看日志: /opt/substore_manage.sh logs"
+
+echo
+print_info "重要文件:"
+echo "数据目录: $DATA_DIR"
+echo "Nginx配置: $NGINX_CONF"
+echo "管理脚本: /opt/substore_manage.sh"
+
+echo
+print_warning "重要提醒:"
+echo "1. 妥善保管 API 路径: $API_PATH"
+echo "2. 定期备份数据目录: $DATA_DIR"
+echo "3. 确保域名解析正确指向服务器IP"
+
+if [[ ! -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" ]]; then
+    echo "4. 如需SSL，请确保域名解析后重新运行脚本"
+fi
+
 echo "=================================================="
