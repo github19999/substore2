@@ -142,7 +142,6 @@ docker pull xream/sub-store
 
 docker run -d --restart=always \
   --name sub-store \
-  -e "SUB_STORE_CRON=0 0 * * *" \
   -e "SUB_STORE_FRONTEND_BACKEND_PATH=$API_PATH" \
   -e "API_URL=$API_URL" \
   -p "127.0.0.1:$PORT:$PORT" \
@@ -295,7 +294,6 @@ cat > /etc/cron.d/substore_update << CRON_UPDATE
 /usr/bin/docker rm sub-store && \\
 /usr/bin/docker run -d --restart=always \\
 --name sub-store \\
--e "SUB_STORE_CRON=0 0 * * *" \\
 -e "SUB_STORE_FRONTEND_BACKEND_PATH=$API_PATH" \\
 -e "API_URL=$API_URL" \\
 -p "127.0.0.1:$PORT:$PORT" \\
