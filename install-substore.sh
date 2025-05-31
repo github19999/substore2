@@ -225,13 +225,13 @@ if [[ "$ssl_confirm" =~ ^[Yy]$ ]]; then
         print_info "8. 更新 HTTPS 配置..."
         cat > "$NGINX_CONF" << NGINX_HTTPS
 server {
-    listen 80;
+    listen 8080;
     server_name $DOMAIN;
     return 301 https://\$host\$request_uri;
 }
 
 server {
-    listen 443 ssl http2;
+    listen 8443 ssl http2;
     server_name $DOMAIN;
 
     ssl_certificate /etc/letsencrypt/live/$DOMAIN/fullchain.pem;
