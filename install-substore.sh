@@ -225,7 +225,7 @@ if [[ "$ssl_confirm" =~ ^[Yy]$ ]]; then
         print_info "8. 更新 HTTPS 配置..."
         cat > "$NGINX_CONF" << NGINX_HTTPS
 server {
-    listen 8080;
+    listen 80;
     server_name $DOMAIN;
     return 301 https://\$host\$request_uri;
 }
