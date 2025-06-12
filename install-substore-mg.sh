@@ -1,59 +1,79 @@
 #!/bin/bash
 
-# 极简版 Sub-Store 部署脚本（仅 HTTP 直连，已安装 Docker）
+set -e
 
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
-info() { echo -e "${YELLOW}[INFO]${NC} $1"; }
-success() { echo -e "${GREEN}[SUCCESS]${NC} $1"; }
-error() { echo -e "${RED}[ERROR]${NC} $1"; }
+echo "更新系统..."
+apt update -y
 
-generate_api_path() {
-    local chars="abcdefghijklmnopqrstuvwxyz0123456789"
-    local path=""
-    for i in {1..8}; do
-        path+="${chars:RANDOM%${#chars}:1}"
-    done
-    echo "/api-$path"
-}
+echo "安装必要组件..."
+apt install unzip curl wget git sudo -y
 
-[[ $EUID -ne 0 ]] && error "请使用 root 用户运行此脚本" && exit 1
+echo "安装 FNM 版本管理器..."
+curl -fsSL https://fnm.vercel.app/install | bash
 
-read -p "请输入 Sub-Store 容器端口（默认 3001）: " PORT
-PORT=${PORT:-3001}
+# 加载 FNM 环境（请根据实际情况调整）
+export PATH="/root/.local/share/fnm:$PATH"
+eval "$(fnm env)"
 
-read -p "自定义 API 路径（留空自动生成）: " API_PATH
-[[ -z "$API_PATH" ]] && API_PATH=$(generate_api_path)
-[[ "$API_PATH" != /* ]] && API_PATH="/$API_PATH"
+echo "安装 Node.js v20.18.0..."
+fnm install v20.18.0
+fnm use v20.18.0
+node -v
 
-DATA_DIR="/opt/sub-store-data"
-API_URL="http://$(curl -s ifconfig.me):$PORT$API_PATH"
+echo "安装 pnpm..."
+curl -fsSL https://get.pnpm.io/install.sh | sh -
+source /root/.bashrc
 
-info "部署配置如下："
-echo "端口: $PORT"
-echo "API路径: $API_PATH"
-echo "API链接: $API_URL"
-echo
-read -p "确认继续部署？(y/N): " confirm
-[[ ! "$confirm" =~ ^[Yy]$ ]] && exit 0
+echo "创建 Sub-Store 项目目录..."
+mkdir -p /root/sub-store
+cd /root/sub-store
 
-mkdir -p "$DATA_DIR"
-docker stop sub-store 2>/dev/null || true
-docker rm sub-store 2>/dev/null || true
+echo "下载后端 sub-store.bundle.js..."
+curl -fsSL https://github.com/sub-store-org/Sub-Store/releases/latest/download/sub-store.bundle.js -o sub-store.bundle.js
 
-info "启动 Sub-Store 容器..."
-docker run -d --restart=always \
-  --name sub-store \
-  -e "SUB_STORE_FRONTEND_BACKEND_PATH=$API_PATH" \
-  -e "API_URL=$API_URL" \
-  -v "$DATA_DIR:/opt/app/data" \
-  -p "$PORT:$PORT" \
-  xream/sub-store
+echo "下载并解压前端 dist.zip..."
+curl -fsSL https://github.com/sub-store-org/Sub-Store-Front-End/releases/latest/download/dist.zip -o dist.zip
+unzip dist.zip && mv dist frontend && rm dist.zip
 
-sleep 2
-if docker ps | grep -q sub-store; then
-  success "Sub-Store 部署成功！"
-  echo "访问地址：http://你的IP:$PORT"
-  echo "订阅链接：http://你的IP:$PORT/subs?api=$API_URL"
-else
-  error "容器启动失败，请检查日志：docker logs sub-store"
-fi
+echo "创建 systemd 服务..."
+
+cat > /etc/systemd/system/sub-store.service <<EOF
+[Unit]
+Description=Sub-Store
+After=network-online.target
+Wants=network-online.target systemd-networkd-wait-online.service
+
+[Service]
+LimitNOFILE=32767
+Type=simple
+Environment="SUB_STORE_FRONTEND_BACKEND_PATH=/9GgGyhWFEguXZBT3oHPY"
+Environment="SUB_STORE_BACKEND_CRON=0 0 * * *"
+Environment="SUB_STORE_FRONTEND_PATH=/root/sub-store/frontend"
+Environment="SUB_STORE_FRONTEND_HOST=0.0.0.0"
+Environment="SUB_STORE_FRONTEND_PORT=3001"
+Environment="SUB_STORE_DATA_BASE_PATH=/root/sub-store"
+Environment="SUB_STORE_BACKEND_API_HOST=127.0.0.1"
+Environment="SUB_STORE_BACKEND_API_PORT=3000"
+ExecStart=/root/.local/share/fnm/fnm exec --using v20.18.0 node /root/sub-store/sub-store.bundle.js
+User=root
+Group=root
+Restart=on-failure
+RestartSec=5s
+ExecStartPre=/bin/sh -c ulimit -n 51200
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+echo "重载 systemd 并启动 Sub-Store 服务..."
+systemctl daemon-reexec
+systemctl daemon-reload
+systemctl enable sub-store
+systemctl start sub-store
+
+echo "✅ 安装完成！"
+echo "你可以使用以下地址访问 Sub-Store："
+echo "http://你的IP:3001/?api=http://你的IP:3001/9GgGyhWFEguXZBT3oHPY"
+echo "建议绑定域名并使用 CDN 隐藏真实 IP。"
