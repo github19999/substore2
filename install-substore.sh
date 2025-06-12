@@ -234,8 +234,8 @@ server {
     listen 8443 ssl http2;
     server_name $DOMAIN;
 
-    ssl_certificate /etc/letsencrypt/live/$DOMAIN/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/$DOMAIN/privkey.pem;
+    ssl_certificate /etc/ssl/private/fullchain.cer;
+    ssl_certificate_key /etc/ssl/private/private.key;
 
     # SSL 优化配置
     ssl_protocols TLSv1.2 TLSv1.3;
@@ -276,7 +276,7 @@ else
 fi
 
 # 9. 设置自动续期
-if [[ -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" ]]; then
+if [[ -f "/etc/letsencrypt/live/$DOMAIN/fullchain.cer" ]]; then
     print_info "9. 设置 SSL 证书自动续期..."
     cat > /etc/cron.daily/cert_renew << CRON_RENEW
 #!/bin/bash
@@ -370,7 +370,7 @@ echo
 # 检查最终状态
 CONTAINER_STATUS=$(docker ps | grep sub-store > /dev/null && echo "✅ 运行中" || echo "❌ 未运行")
 NGINX_STATUS=$(systemctl is-active nginx)
-SSL_STATUS=$([[ -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" ]] && echo "✅ 已配置" || echo "❌ 未配置")
+SSL_STATUS=$([[ -f "/etc/letsencrypt/live/$DOMAIN/fullchain.cer" ]] && echo "✅ 已配置" || echo "❌ 未配置")
 
 print_info "部署状态:"
 echo "Docker容器: $CONTAINER_STATUS"
@@ -379,7 +379,7 @@ echo "SSL证书: $SSL_STATUS"
 echo
 
 print_info "访问地址:"
-if [[ -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" ]]; then
+if [[ -f "/etc/letsencrypt/live/$DOMAIN/fullchain.cer" ]]; then
     echo "🌐 管理面板: https://$DOMAIN"
     echo "📱 订阅地址: https://$DOMAIN/subs?api=$API_URL"
 else
@@ -405,7 +405,7 @@ echo "1. 妥善保管 API 路径: $API_PATH"
 echo "2. 定期备份数据目录: $DATA_DIR"
 echo "3. 确保域名解析正确指向服务器IP"
 
-if [[ ! -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" ]]; then
+if [[ ! -f "/etc/letsencrypt/live/$DOMAIN/fullchain.cer" ]]; then
     echo "4. 如需SSL，请确保域名解析后重新运行脚本"
 fi
 
